@@ -110,10 +110,26 @@ def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParam
         gaussians = GaussianModel(dataset.sh_degree, pipeline.env_mode, dataset.envmap_res, 
                                   dataset.use_delta, True)
         scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False)
+        # Use the actual loaded iteration, including when --iteration is -1.
+        loaded_iteration = scene.loaded_iter
 
-        sdf_render = SDF_RENDER_DICT[sdf_opt.sdf_mode]({}).cuda()
+        ckpt_path = os.path.join(
+            scene.model_path,
+            "sdf_render",
+            f"iteration_{loaded_iteration}",
+            "tensosdf.th",
+        )
+        ckpt = torch.load(ckpt_path, map_location="cpu")
+
+        # Restore the trained grid resolution, bounding box, and other settings.
+        cfg = dict(ckpt["kwargs"])
+        cfg["device"] = "cuda"
+
+        sdf_render = SDF_RENDER_DICT[sdf_opt.sdf_mode](cfg).cuda()
+
+        # Required by the official load_ckpt(), which also restores the optimizer.
         sdf_render.training_setup(sdf_opt)
-        sdf_render.load_iter(scene.model_path, iteration, True)
+        sdf_render.load_ckpt(ckpt)
         sdf_render.eval()
 
         log_f = open(f'{dataset.model_path}/render_log.txt', 'w')
