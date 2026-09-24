@@ -127,6 +127,21 @@ def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParam
 
         sdf_render = SDF_RENDER_DICT[sdf_opt.sdf_mode](cfg).cuda()
 
+        # Match the parameter shapes produced by training-time upsampling.
+        state = ckpt["network_state_dict"]
+        network = sdf_render.sdf_network
+
+        for i in range(len(network.sdf_plane)):
+            saved = state[f"sdf_network.sdf_plane.{i}"]
+            current = network.sdf_plane[i]
+
+            network.sdf_plane[i] = torch.nn.Parameter(
+                torch.empty(
+                    saved.shape,
+                    device=current.device,
+                    dtype=current.dtype,
+                )
+            )
         # Required by the official load_ckpt(), which also restores the optimizer.
         sdf_render.training_setup(sdf_opt)
         sdf_render.load_ckpt(ckpt)
