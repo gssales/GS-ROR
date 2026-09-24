@@ -9,6 +9,7 @@
 # For inquiries contact  george.drettakis@inria.fr
 #
 
+from fields.shape_renders import SDF_RENDER_DICT
 import torch
 from scene import Scene
 import os
@@ -18,7 +19,7 @@ from gaussian_renderer import RENDER_DICT, render_lighting
 import torchvision
 from utils.general_utils import safe_state
 from argparse import ArgumentParser
-from arguments import ModelParams, PipelineParams, get_combined_args
+from arguments import ModelParams, PipelineParams, TensoSDFOptimParams, get_combined_args
 from scene import GaussianModel
 from utils.image_utils import apply_depth_colormap
 from scene.NVDIFFREC.util import save_image_raw
@@ -70,11 +71,51 @@ def render_set(model_path, name, iteration, views, scene, pipeline, background):
                 render_pkg[k] = 0.5 + (0.5*render_pkg[k])
             torchvision.utils.save_image(render_pkg[k], os.path.join(save_path, '{0:05d}'.format(idx) + ".png"))
 
-def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParams, skip_train : bool, skip_test : bool):
+def render_sdf_images(model_path, name, iteration, views, scene, sdf_render):
+    sdf_normal_path = os.path.join(model_path, name, "ours_{}".format(iteration), "sdf_normal")
+    sdf_depth_path = os.path.join(model_path, name, "ours_{}".format(iteration), "sdf_depth")
+    makedirs(sdf_normal_path, exist_ok=True)
+    makedirs(sdf_depth_path, exist_ok=True)
+
+    for idx, viewpoint in enumerate(tqdm(views, desc="Rendering SDF progress")):
+        
+        mask = viewpoint.gt_alpha_mask.cuda()
+        viewdirs, valid_mask = viewpoint.get_filtered_ray()
+        valid_viewdirs = viewdirs.view(-1, 3)
+        bs = valid_viewdirs.shape[0]
+        gt_image = viewpoint.original_image.cuda()
+        H, W = gt_image.shape[1:]
+        mask[mask < 0.5] = 0
+        mask[mask >= 0.5] = 1
+        valid_gt = (gt_image * mask + 1 - mask).permute(1, 2, 0).view(-1, 3)
+        ray_batch = {
+            'rays_o': viewpoint.camera_center.repeat(bs, 1),
+            'rgbs': valid_gt,
+            'dirs': valid_viewdirs, 
+            'step': iteration + 99999999
+        }
+        output = sdf_render(ray_batch, is_train=False)
+        normal = output['normal'].view(H, W, 3).permute(2, 0, 1)
+        normal = 0.5 + (0.5*normal)
+        depth = output['depth'].view(H, W, 1).permute(2, 0, 1)
+        depth = apply_depth_colormap(-depth[0][...,None])
+        depth = depth.permute(2,0,1)
+
+        torchvision.utils.save_image(normal, os.path.join(sdf_normal_path, '{0:05d}'.format(idx) + ".png"))
+        torchvision.utils.save_image(depth, os.path.join(sdf_depth_path, '{0:05d}'.format(idx) + ".png"))
+
+
+def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParams, sdf_opt : TensoSDFOptimParams, skip_train : bool, skip_test : bool):
     with torch.no_grad():
         gaussians = GaussianModel(dataset.sh_degree, pipeline.env_mode, dataset.envmap_res, 
                                   dataset.use_delta, True)
         scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False)
+
+        sdf_render = SDF_RENDER_DICT[sdf_opt.sdf_mode]({}).cuda()
+        sdf_render.training_setup(sdf_opt)
+        sdf_render.load_iter(scene.model_path, iteration, True)
+        sdf_render.eval()
+
         log_f = open(f'{dataset.model_path}/render_log.txt', 'w')
         log_f.write(f"Number of gaussians: {gaussians.get_xyz.shape[0]}\n")
         bg_color = [1,1,1] if dataset.white_background else [0, 0, 0]
@@ -87,7 +128,9 @@ def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParam
              render_set(dataset.model_path, "train", scene.loaded_iter, cams, scene, pipeline, background)
 
         if not skip_test:
-             render_set(dataset.model_path, "test", scene.loaded_iter, scene.getTestCameras(), scene, pipeline, background)
+            render_set(dataset.model_path, "test", scene.loaded_iter, scene.getTestCameras(), scene, pipeline, background)
+            render_sdf_images(dataset.model_path, "test", scene.loaded_iter, scene.getTestCameras(), scene, sdf_render)  
+
 
         render_lightings(dataset.model_path, "lighting", scene.loaded_iter, scene)
         log_f.close() 
@@ -97,6 +140,7 @@ if __name__ == "__main__":
     parser = ArgumentParser(description="Testing script parameters")
     model = ModelParams(parser, sentinel=True)
     pipeline = PipelineParams(parser)
+    sdf_opt = TensoSDFOptimParams(parser)
     parser.add_argument("--iteration", default=-1, type=int)
     parser.add_argument("--skip_train", action="store_true")
     parser.add_argument("--skip_test", action="store_true")
@@ -108,4 +152,4 @@ if __name__ == "__main__":
     # Initialize system state (RNG)
     safe_state(args.quiet)
 
-    render_sets(model.extract(args), args.iteration, pipeline.extract(args), args.skip_train, args.skip_test)
+    render_sets(model.extract(args), args.iteration, pipeline.extract(args), sdf_opt.extract(args), args.skip_train, args.skip_test)
