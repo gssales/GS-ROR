@@ -78,7 +78,6 @@ def render_sdf_images(model_path, name, iteration, views, scene, sdf_render):
     makedirs(sdf_depth_path, exist_ok=True)
 
     for idx, viewpoint in enumerate(tqdm(views, desc="Rendering SDF progress")):
-        
         mask = viewpoint.gt_alpha_mask.cuda()
         viewdirs, valid_mask = viewpoint.get_filtered_ray()
         valid_viewdirs = viewdirs.view(-1, 3)
@@ -88,13 +87,26 @@ def render_sdf_images(model_path, name, iteration, views, scene, sdf_render):
         mask[mask < 0.5] = 0
         mask[mask >= 0.5] = 1
         valid_gt = (gt_image * mask + 1 - mask).permute(1, 2, 0).view(-1, 3)
-        ray_batch = {
-            'rays_o': viewpoint.camera_center.repeat(bs, 1),
-            'rgbs': valid_gt,
-            'dirs': valid_viewdirs, 
-            'step': iteration + 99999999
-        }
-        output = sdf_render(ray_batch, is_train=False)
+        batch_size = 1536
+        chunk_idxs = torch.split(torch.arange(bs), batch_size)
+        normal = None
+        depth = None
+        for chunk_idx in chunk_idxs:
+            ray_batch = {
+                'rays_o': viewpoint.camera_center.repeat(len(chunk_idx), 1),
+                'rgbs': valid_gt[chunk_idx],
+                'dirs': valid_viewdirs[chunk_idx], 
+                'step': iteration + 99999999
+            }
+            output = sdf_render(ray_batch, is_train=False)
+            if normal is None:
+                normal = [output['normal'].detach().clone()]
+                depth = [output['depth'].detach().clone()]
+            else:
+                normal.append(output['normal'].detach().clone())
+                depth.append(output['depth'].detach().clone())
+        normal = torch.cat(normal, dim=0)
+        depth = torch.cat(depth, dim=0)
         normal = output['normal'].view(H, W, 3).permute(2, 0, 1)
         normal = 0.5 + (0.5*normal)
         depth = output['depth'].view(H, W, 1).permute(2, 0, 1)
